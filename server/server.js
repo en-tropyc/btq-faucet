@@ -101,28 +101,31 @@ function computeAccrued(activeSeconds) {
   return (activeSeconds / 60) * CONFIG.REWARD_PER_MINUTE;
 }
 
-// BTQ address formats:
-// - Dilithium testnet: starts with 'n' (base58, ~50 chars)
-// - Dilithium mainnet: starts with 'd' (base58, ~50 chars)
-// - SegWit testnet: starts with 'tbtq1q' (bech32)
-// - SegWit mainnet: starts with 'btq1q' (bech32)
-// - Legacy testnet: starts with 'm' or 'n' (but shorter than Dilithium)
-// - Legacy mainnet: starts with 'B'
+// BTQ address formats (from btq-core chainparams.cpp):
+// - Dilithium base58: 'n' (testnet/signet/regtest), 'd' (mainnet) — ~50 chars
+// - Dilithium bech32: HRP 'tdbt' (testnet), 'sdbt' (signet), 'rdbt' (regtest), 'dbtc' (mainnet)
+// - SegWit bech32: HRP 'tbtq' (testnet), 'qtb' (signet), 'qcrt' (regtest), 'qbtc' (mainnet)
+// - Legacy base58: 'm'/'n' (testnet/signet/regtest), 'B' (mainnet) — 25-34 chars
 
 function getAddressType(address) {
   if (!address || typeof address !== 'string') return null;
 
-  // Dilithium addresses (base58, longer ~50 chars)
+  // Dilithium base58 addresses (longer ~50 chars)
   if (/^[nd][a-km-zA-HJ-NP-Z1-9]{40,60}$/.test(address)) {
     return 'dilithium';
   }
 
-  // SegWit bech32 addresses
-  if (/^(tbtq1q|btq1q)[a-z0-9]{38,}$/.test(address)) {
+  // Dilithium bech32 addresses (HRP: tdbt, sdbt, rdbt, dbtc)
+  if (/^(tdbt|sdbt|rdbt|dbtc)1[a-z0-9]{38,}$/.test(address)) {
+    return 'dilithium';
+  }
+
+  // SegWit bech32 addresses (HRP: tbtq, qtb, qcrt, qbtc)
+  if (/^(tbtq|qtb|qcrt|qbtc)1q[a-z0-9]{38,}$/.test(address)) {
     return 'segwit';
   }
 
-  // Legacy addresses (shorter base58)
+  // Legacy base58 addresses (shorter)
   if (/^[mMnNB][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(address)) {
     return 'legacy';
   }
