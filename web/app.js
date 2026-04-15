@@ -102,7 +102,7 @@ function setState(newState) {
       addressInput.disabled = false;
       // Only enable start button if captcha is verified (or captcha is disabled)
       startBtn.disabled = captchaEnabled && !captchaToken;
-      startBtn.innerHTML = 'Start Mining';
+      startBtn.textContent = 'Start Mining';
       // Reset captcha when returning to ready state
       if (typeof hcaptcha !== 'undefined' && captchaEnabled) {
         hcaptcha.reset();
@@ -168,17 +168,23 @@ function updateClaimableUI() {
 function setButtonLoading(button, loading, loadingText = '') {
   if (loading) {
     button.disabled = true;
-    button.dataset.originalText = button.innerHTML;
-    button.innerHTML = `<span class="spinner"></span>${loadingText ? ' ' + loadingText : ''}`;
+    button.dataset.originalText = button.textContent;
+    button.textContent = '';
+    const spinner = document.createElement('span');
+    spinner.className = 'spinner';
+    button.appendChild(spinner);
+    if (loadingText) {
+      button.appendChild(document.createTextNode(' ' + loadingText));
+    }
   } else {
     button.disabled = false;
-    button.innerHTML = button.dataset.originalText || button.innerHTML;
+    button.textContent = button.dataset.originalText || button.textContent;
   }
 }
 
-// Messages
+// Messages (use textContent / DOM API — never innerHTML — to prevent XSS)
 function showMessage(text, type = 'error') {
-  messageText.innerHTML = text;
+  messageText.textContent = text;
   messageEl.className = `message ${type} show`;
 }
 
@@ -187,18 +193,34 @@ function dismissMessage() {
 }
 
 function showSuccess(txid) {
-  showMessage(`
-    Transaction sent successfully!<br>
-    <a href="https://explorer.bitcoinquantum.com/tx/${txid}" target="_blank" style="word-break: break-all; font-size: 12px;">View on Block Explorer</a>
-  `, 'success');
+  messageText.textContent = '';
+  messageText.appendChild(document.createTextNode('Transaction sent successfully! '));
+  messageText.appendChild(document.createElement('br'));
+  const link = document.createElement('a');
+  link.href = 'https://explorer.bitcoinquantum.com/tx/' + encodeURIComponent(txid);
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.style.wordBreak = 'break-all';
+  link.style.fontSize = '12px';
+  link.textContent = 'View on Block Explorer';
+  messageText.appendChild(link);
+  messageEl.className = 'message success show';
 }
 
 function showError(message, actionable = null) {
-  let html = message;
+  messageText.textContent = message;
   if (actionable) {
-    html += ` <a href="#" onclick="${actionable.action}; return false;">${actionable.text}</a>`;
+    messageText.appendChild(document.createTextNode(' '));
+    const link = document.createElement('a');
+    link.href = '#';
+    link.textContent = actionable.text;
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      actionable.action();
+    });
+    messageText.appendChild(link);
   }
-  showMessage(html, 'error');
+  messageEl.className = 'message error show';
 }
 
 // API Functions
@@ -342,7 +364,7 @@ async function startMining() {
         miningActive = false;
         stopWorker();
         miningHero.classList.remove('pulse');
-        showError('Connection lost.', { text: 'Tap to retry', action: 'startMining()' });
+        showError('Connection lost.', { text: 'Tap to retry', action: startMining });
         setState(AppState.READY);
       }
     });
@@ -352,7 +374,7 @@ async function startMining() {
         miningActive = false;
         stopWorker();
         miningHero.classList.remove('pulse');
-        showError('Connection error.', { text: 'Tap to retry', action: 'startMining()' });
+        showError('Connection error.', { text: 'Tap to retry', action: startMining });
         setState(AppState.READY);
       }
     });
@@ -605,6 +627,8 @@ newSessionBtn.addEventListener('click', () => {
   setState(AppState.READY);
 });
 
+document.getElementById('dismiss-btn').addEventListener('click', dismissMessage);
+
 // Cleanup on page unload
 window.addEventListener('beforeunload', () => {
   stopWorker();
@@ -671,7 +695,7 @@ async function initialize() {
     const healthResponse = await fetch('/api/health');
     const health = await healthResponse.json();
 
-    if (health.rpc !== 'ok') {
+    if (health.status !== 'ok') {
       showError('Faucet is currently offline. Please try again later.');
       startBtn.disabled = true;
     }
