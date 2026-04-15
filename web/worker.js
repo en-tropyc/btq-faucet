@@ -1,5 +1,5 @@
-// Import SHA-256 library
-importScripts('https://cdn.jsdelivr.net/npm/js-sha256@0.11.0/build/sha256.min.js');
+// SHA-256 library — bundled locally to avoid CDN supply chain risk
+importScripts('./sha256.min.js');
 
 let stopped = false;
 let currentDifficulty = 0;

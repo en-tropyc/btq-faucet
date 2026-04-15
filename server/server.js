@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const path = require('path');
 const http = require('http');
 const { WebSocketServer } = require('ws');
+const rateLimit = require('express-rate-limit');
 const FaucetDB = require('./db');
 
 // Configuration from environment
@@ -23,17 +24,88 @@ const CONFIG = {
   ACTIVE_SHARE_WINDOW: parseInt(process.env.ACTIVE_SHARE_WINDOW || '30'),
   MAX_SESSION_SECONDS: parseInt(process.env.MAX_SESSION_SECONDS || '150'), // 2.5 minutes
   SESSION_EXPIRE_SECONDS: parseInt(process.env.SESSION_EXPIRE_SECONDS || '3600'),
-  IP_SALT: process.env.IP_SALT || crypto.randomBytes(32).toString('hex'),
+  IP_SALT: process.env.IP_SALT || '',
   PORT: parseInt(process.env.PORT || '3000'),
   // hCaptcha configuration (optional)
   HCAPTCHA_SITEKEY: process.env.HCAPTCHA_SITEKEY || '',
-  HCAPTCHA_SECRET: process.env.HCAPTCHA_SECRET || ''
+  HCAPTCHA_SECRET: process.env.HCAPTCHA_SECRET || '',
+  // Security configuration
+  HEALTH_API_KEY: process.env.HEALTH_API_KEY || '',
+  ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()) : [],
+  MAX_WS_PER_IP: parseInt(process.env.MAX_WS_PER_IP || '10'),
+  MAX_WS_MSG_PER_SEC: parseInt(process.env.MAX_WS_MSG_PER_SEC || '50'),
 };
+
+// Startup validation
+if (!CONFIG.RPC_PASS) {
+  console.error('FATAL: RPC_PASS environment variable is required');
+  process.exit(1);
+}
+
+if (!CONFIG.IP_SALT) {
+  CONFIG.IP_SALT = crypto.randomBytes(32).toString('hex');
+  console.warn('WARNING: IP_SALT not set in .env. Using ephemeral salt — IP hashes will not persist across restarts.');
+}
+
+// Satoshi arithmetic helpers — avoids floating point errors in financial calculations
+const SAT = 100_000_000;
+function toSat(btc) { return Math.round(Number(btc) * SAT); }
+function fromSat(sat) { return Number((sat / SAT).toFixed(8)); }
 
 const app = express();
 const db = new FaucetDB();
 
+// Required for correct client IP detection behind nginx reverse proxy
+app.set('trust proxy', 1);
+
 app.use(express.json());
+
+// Security headers (defense-in-depth — nginx also sets these)
+app.use((req, res, next) => {
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self' https://js.hcaptcha.com https://*.hcaptcha.com",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "frame-src https://newassets.hcaptcha.com https://*.hcaptcha.com",
+    "connect-src 'self' wss: ws: https://hcaptcha.com https://*.hcaptcha.com",
+    "img-src 'self' data:",
+    "worker-src 'self' blob:",
+    "base-uri 'self'",
+    "form-action 'self'"
+  ].join('; '));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('X-XSS-Protection', '0');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
+// Rate limiters
+const startLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' }
+});
+
+const claimLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many claim attempts, please try again later' }
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' }
+});
+
 app.use(express.static(path.join(__dirname, '../web')));
 
 // RPC client with Basic auth
@@ -98,7 +170,9 @@ function computeDifficulty(baseDifficulty, activeSeconds) {
 }
 
 function computeAccrued(activeSeconds) {
-  return (activeSeconds / 60) * CONFIG.REWARD_PER_MINUTE;
+  const rewardPerMinuteSat = toSat(CONFIG.REWARD_PER_MINUTE);
+  const accruedSat = Math.floor((activeSeconds / 60) * rewardPerMinuteSat);
+  return fromSat(accruedSat);
 }
 
 // BTQ address formats:
@@ -162,20 +236,19 @@ async function verifyCaptcha(token, remoteIp) {
   }
 }
 
-// Select coins for transaction
-function selectCoins(utxos, targetAmount) {
-  // Sort UTXOs by amount (ascending) for efficient selection
+// Select coins for transaction (uses satoshi integers internally)
+function selectCoins(utxos, targetSat) {
   const sorted = [...utxos].sort((a, b) => a.amount - b.amount);
 
   let selected = [];
-  let total = 0;
+  let totalSat = 0;
 
   for (const utxo of sorted) {
     selected.push(utxo);
-    total += utxo.amount;
+    totalSat += toSat(utxo.amount);
 
-    if (total >= targetAmount) {
-      return { selected, total };
+    if (totalSat >= targetSat) {
+      return { selected, totalSat };
     }
   }
 
@@ -192,9 +265,11 @@ async function sendTx(address, amount, fee) {
       throw new Error('No UTXOs available');
     }
 
-    // 2. Select coins
-    const targetAmount = amount + fee;
-    const { selected, total } = selectCoins(utxos, targetAmount);
+    // 2. Select coins (all arithmetic in satoshis to avoid float errors)
+    const amountSat = toSat(amount);
+    const feeSat = toSat(fee);
+    const targetSat = amountSat + feeSat;
+    const { selected, totalSat } = selectCoins(utxos, targetSat);
 
     // 3. Determine signing method based on UTXO address types
     const hasDilithiumInputs = selected.some(utxo => getAddressType(utxo.address) === 'dilithium');
@@ -210,15 +285,14 @@ async function sendTx(address, amount, fee) {
       vout: utxo.vout
     }));
 
-    // 5. Prepare outputs
-    const outputs = { [address]: amount };
+    // 5. Prepare outputs (convert back to BTC for RPC)
+    const outputs = { [address]: fromSat(amountSat) };
 
-    // Add change output if needed (send to faucet address or source)
-    const change = total - targetAmount;
-    if (change > 0.00001) { // Dust threshold
-      // Use configured faucet address, or fallback to source address
+    // Add change output if needed
+    const changeSat = totalSat - targetSat;
+    if (changeSat > 1000) { // 1000 sat dust threshold
       const changeAddress = CONFIG.FAUCET_ADDRESS || selected[0].address;
-      outputs[changeAddress] = parseFloat(change.toFixed(8));
+      outputs[changeAddress] = fromSat(changeSat);
     }
 
     // 6. Create raw transaction
@@ -232,13 +306,13 @@ async function sendTx(address, amount, fee) {
       throw new Error('Transaction signing incomplete');
     }
 
-    // 7. Send transaction
+    // 8. Send transaction
     const txid = await btqRPC('sendrawtransaction', [signedTx.hex]);
 
     return txid;
   } catch (error) {
     if (error.message.includes('locked')) {
-      throw new Error('Wallet is locked. Please unlock with: btq-cli -rpcwallet=faucet walletpassphrase <passphrase> 60');
+      throw new Error('Wallet is locked');
     }
     throw error;
   }
@@ -256,7 +330,7 @@ app.get('/api/config', (req, res) => {
 });
 
 // POST /api/mining/start
-app.post('/api/mining/start', async (req, res) => {
+app.post('/api/mining/start', startLimiter, async (req, res) => {
   try {
     const { address, captchaToken } = req.body;
 
@@ -303,12 +377,12 @@ app.post('/api/mining/start', async (req, res) => {
     });
   } catch (error) {
     console.error('Start mining error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // POST /api/mining/stop
-app.post('/api/mining/stop', (req, res) => {
+app.post('/api/mining/stop', apiLimiter, (req, res) => {
   try {
     const { sessionId } = req.body;
 
@@ -355,12 +429,12 @@ app.post('/api/mining/stop', (req, res) => {
     });
   } catch (error) {
     console.error('Stop mining error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // POST /api/mining/resume
-app.post('/api/mining/resume', (req, res) => {
+app.post('/api/mining/resume', apiLimiter, (req, res) => {
   try {
     const { sessionId } = req.body;
 
@@ -388,12 +462,12 @@ app.post('/api/mining/resume', (req, res) => {
     });
   } catch (error) {
     console.error('Resume mining error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // POST /api/mining/claim
-app.post('/api/mining/claim', async (req, res) => {
+app.post('/api/mining/claim', claimLimiter, async (req, res) => {
   try {
     const { sessionId } = req.body;
 
@@ -423,7 +497,7 @@ app.post('/api/mining/claim', async (req, res) => {
       });
     }
 
-    const amount = parseFloat(accrued.toFixed(8));
+    const amount = fromSat(toSat(accrued));
 
     let txid;
     try {
@@ -438,14 +512,10 @@ app.post('/api/mining/claim', async (req, res) => {
       });
 
       if (error.message.includes('locked')) {
-        return res.status(503).json({ error: error.message });
+        return res.status(503).json({ error: 'Faucet is temporarily unavailable' });
       }
       if (error.message.includes('Insufficient')) {
-        const balance = await btqRPC('getbalance');
-        return res.status(503).json({
-          error: 'Faucet has insufficient funds',
-          balance: balance
-        });
+        return res.status(503).json({ error: 'Faucet has insufficient funds' });
       }
       throw error;
     }
@@ -470,30 +540,34 @@ app.post('/api/mining/claim', async (req, res) => {
     });
   } catch (error) {
     console.error('Claim error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // GET /api/health
-app.get('/api/health', async (req, res) => {
+app.get('/api/health', apiLimiter, async (req, res) => {
   try {
-    // Test RPC connection
     const balance = await btqRPC('getbalance');
     const walletInfo = await btqRPC('getwalletinfo');
 
-    res.json({
-      status: 'ok',
-      balance: balance,
-      rpc: 'ok',
-      walletLoaded: true,
-      walletUnlocked: !walletInfo.unlocked_until || walletInfo.unlocked_until > 0
-    });
+    // Detailed info requires API key when configured
+    const isAuthorized = !CONFIG.HEALTH_API_KEY ||
+      req.headers['x-api-key'] === CONFIG.HEALTH_API_KEY;
+
+    if (isAuthorized) {
+      res.json({
+        status: 'ok',
+        balance: balance,
+        rpc: 'ok',
+        walletLoaded: true,
+        walletUnlocked: !walletInfo.unlocked_until || walletInfo.unlocked_until > 0
+      });
+    } else {
+      res.json({ status: 'ok' });
+    }
   } catch (error) {
-    res.status(503).json({
-      status: 'error',
-      rpc: 'fail',
-      error: error.message
-    });
+    console.error('Health check error:', error);
+    res.status(503).json({ status: 'error' });
   }
 });
 
@@ -523,8 +597,55 @@ setInterval(() => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-wss.on('connection', (ws) => {
+// WebSocket connection tracking for per-IP limits
+const wsConnections = new Map();
+
+wss.on('connection', (ws, req) => {
+  // Validate Origin header to prevent cross-site WebSocket hijacking
+  if (CONFIG.ALLOWED_ORIGINS.length > 0) {
+    const origin = req.headers.origin;
+    if (!CONFIG.ALLOWED_ORIGINS.includes(origin)) {
+      ws.close(1008, 'Origin not allowed');
+      return;
+    }
+  }
+
+  // Per-IP connection limiting
+  const wsIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+  const wsIpHash = hashIP(wsIp);
+  const connCount = wsConnections.get(wsIpHash) || 0;
+  if (connCount >= CONFIG.MAX_WS_PER_IP) {
+    ws.close(1008, 'Too many connections');
+    return;
+  }
+  wsConnections.set(wsIpHash, connCount + 1);
+
+  ws.on('close', () => {
+    const c = wsConnections.get(wsIpHash) || 1;
+    if (c <= 1) {
+      wsConnections.delete(wsIpHash);
+    } else {
+      wsConnections.set(wsIpHash, c - 1);
+    }
+  });
+
+  // Per-connection message rate limiting
+  let msgCount = 0;
+  let msgWindowStart = Date.now();
+
   ws.on('message', (data) => {
+    // Enforce message rate limit
+    const msgNow = Date.now();
+    if (msgNow - msgWindowStart > 1000) {
+      msgCount = 0;
+      msgWindowStart = msgNow;
+    }
+    msgCount++;
+    if (msgCount > CONFIG.MAX_WS_MSG_PER_SEC) {
+      ws.send(JSON.stringify({ type: 'error', error: 'Rate limit exceeded' }));
+      return;
+    }
+
     let message;
     try {
       message = JSON.parse(data.toString());
@@ -539,8 +660,8 @@ wss.on('connection', (ws) => {
     }
 
     const { sessionId, counter } = message;
-    if (!sessionId || counter === undefined) {
-      ws.send(JSON.stringify({ type: 'error', error: 'Missing sessionId or counter' }));
+    if (!sessionId || typeof counter !== 'number' || !Number.isInteger(counter) || counter < 0) {
+      ws.send(JSON.stringify({ type: 'error', error: 'Invalid sessionId or counter' }));
       return;
     }
 
@@ -649,6 +770,7 @@ server.listen(CONFIG.PORT, () => {
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\nShutting down...');
+  wss.close();
   db.close();
   process.exit(0);
 });
