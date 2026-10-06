@@ -121,3 +121,9 @@ test('readAddressParam flags invalid addresses without echoing them', () => {
   assert.deepEqual(BTQAddress.readAddressParam('?address=%3Cscript%3Ealert(1)%3C%2Fscript%3E'), { status: 'invalid' });
   assert.deepEqual(BTQAddress.readAddressParam(`?address=${MAINNET_LOOKING}`), { status: 'invalid' });
 });
+
+test('ADDRESS_TYPES lists exactly the labels getAddressType returns', () => {
+  const labels = new Set([P2MR, P2WPKH, DILITHIUM_BASE58_LONG, LEGACY_P2PKH].map((a) => BTQAddress.getAddressType(a)));
+  assert.deepEqual([...labels].sort(), [...BTQAddress.ADDRESS_TYPES].sort());
+  assert.equal(BTQAddress.ADDRESS_TYPES[0], 'p2mr');
+});

@@ -57,6 +57,7 @@ fi
 
 # Start server with regtest configuration
 export RPC_PORT=18443
+export BECH32_HRP=qcrt
 export RPC_USER=test
 export RPC_PASS=test
 export DIFFICULTY_BASE=3

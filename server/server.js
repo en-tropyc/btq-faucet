@@ -7,6 +7,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const rateLimit = require('express-rate-limit');
 const FaucetDB = require('./db');
+const BTQAddress = require('../web/btq-address');
 
 // Configuration from environment
 const CONFIG = {
@@ -15,6 +16,7 @@ const CONFIG = {
   RPC_USER: process.env.RPC_USER || 'btqrpc',
   RPC_PASS: process.env.RPC_PASS || '',
   RPC_WALLET: process.env.RPC_WALLET || 'faucet',
+  BECH32_HRP: (process.env.BECH32_HRP || 'tbtq').toLowerCase(),
   FAUCET_ADDRESS: process.env.FAUCET_ADDRESS || '', // Main faucet address for change
   FAUCET_FEE: parseFloat(process.env.FAUCET_FEE || '0.0001'),
   REWARD_PER_MINUTE: parseFloat(process.env.REWARD_PER_MINUTE || '0.01'),
@@ -53,7 +55,7 @@ function toSat(btc) { return Math.round(Number(btc) * SAT); }
 function fromSat(sat) { return Number((sat / SAT).toFixed(8)); }
 
 const app = express();
-const db = new FaucetDB();
+const db = new FaucetDB(process.env.DB_PATH || undefined);
 
 // Required for correct client IP detection behind nginx reverse proxy
 app.set('trust proxy', 1);
@@ -105,6 +107,13 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many requests, please try again later' }
 });
+
+// Only for read-only GETs that wallets probe from their own origin (e.g. a browser extension).
+// Mount it before any limiter so 429 and 503 responses stay readable too.
+function allowAnyOrigin(req, res, next) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  next();
+}
 
 app.use(express.static(path.join(__dirname, '../web')));
 
@@ -175,37 +184,8 @@ function computeAccrued(activeSeconds) {
   return fromSat(accruedSat);
 }
 
-// BTQ address formats:
-// - Dilithium testnet: starts with 'n' (base58, ~50 chars)
-// - Dilithium mainnet: starts with 'd' (base58, ~50 chars)
-// - SegWit testnet: starts with 'tbtq1q' (bech32)
-// - SegWit mainnet: starts with 'btq1q' (bech32)
-// - Legacy testnet: starts with 'm' or 'n' (but shorter than Dilithium)
-// - Legacy mainnet: starts with 'B'
-
 function getAddressType(address) {
-  if (!address || typeof address !== 'string') return null;
-
-  // Dilithium addresses (base58, longer ~50 chars)
-  if (/^[nd][a-km-zA-HJ-NP-Z1-9]{40,60}$/.test(address)) {
-    return 'dilithium';
-  }
-
-  // SegWit bech32 addresses
-  if (/^(tbtq1q|btq1q)[a-z0-9]{38,}$/.test(address)) {
-    return 'segwit';
-  }
-
-  // Legacy addresses (shorter base58)
-  if (/^[mMnNB][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(address)) {
-    return 'legacy';
-  }
-
-  return null;
-}
-
-function validateAddress(address) {
-  return getAddressType(address) !== null;
+  return BTQAddress.getAddressType(address, { hrp: CONFIG.BECH32_HRP });
 }
 
 // Verify hCaptcha token
@@ -324,17 +304,28 @@ async function sendTx(address, amount, fee) {
 app.get('/api/config', (req, res) => {
   res.json({
     captchaSiteKey: CONFIG.HCAPTCHA_SITEKEY || null,
+    bech32Hrp: CONFIG.BECH32_HRP,
     minClaim: CONFIG.MIN_CLAIM,
     rewardPerMinute: CONFIG.REWARD_PER_MINUTE
+  });
+});
+
+// GET /api/capabilities - Lets wallets detect a faucet that accepts their addresses and ?address= links
+app.get('/api/capabilities', allowAnyOrigin, (req, res) => {
+  res.json({
+    addressTypes: BTQAddress.ADDRESS_TYPES,
+    prefill: true,
+    version: 1
   });
 });
 
 // POST /api/mining/start
 app.post('/api/mining/start', startLimiter, async (req, res) => {
   try {
-    const { address, captchaToken } = req.body;
+    const { captchaToken } = req.body;
+    const address = BTQAddress.normalizeAddress(req.body.address, { hrp: CONFIG.BECH32_HRP });
 
-    if (!validateAddress(address)) {
+    if (!address) {
       return res.status(400).json({ error: 'Invalid address' });
     }
 
@@ -545,7 +536,7 @@ app.post('/api/mining/claim', claimLimiter, async (req, res) => {
 });
 
 // GET /api/health
-app.get('/api/health', apiLimiter, async (req, res) => {
+app.get('/api/health', allowAnyOrigin, apiLimiter, async (req, res) => {
   try {
     const balance = await btqRPC('getbalance');
     const walletInfo = await btqRPC('getwalletinfo');

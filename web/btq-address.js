@@ -8,6 +8,8 @@
   'use strict';
 
   const DEFAULT_HRP = 'tbtq';
+  // Every label getAddressType can return; GET /api/capabilities advertises this list.
+  const ADDRESS_TYPES = ['p2mr', 'segwit', 'dilithium', 'legacy'];
   const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
   const GENERATOR = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
   const BECH32_CONST = 1;
@@ -129,5 +131,5 @@
     return address ? { status: 'valid', address } : { status: 'invalid' };
   }
 
-  return { DEFAULT_HRP, decodeSegwit, getAddressType, normalizeAddress, readAddressParam };
+  return { DEFAULT_HRP, ADDRESS_TYPES, decodeSegwit, getAddressType, normalizeAddress, readAddressParam };
 });
