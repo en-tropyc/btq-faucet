@@ -19,6 +19,7 @@ let minClaim = 0.01;
 let currentAddress = '';
 let captchaToken = null;
 let captchaEnabled = false;
+let bech32Hrp = BTQAddress.DEFAULT_HRP;
 
 // DOM Elements - Sections
 const stateReady = document.getElementById('state-ready');
@@ -56,33 +57,13 @@ const newSessionBtn = document.getElementById('new-session-btn');
 const messageEl = document.getElementById('message');
 const messageText = document.getElementById('message-text');
 
-// Address Validation
-// BTQ address formats:
-// - Dilithium testnet: starts with 'n' (base58, ~50 chars)
-// - Dilithium mainnet: starts with 'd' (base58, ~50 chars)
-// - SegWit testnet: starts with 'tbtq1q' (bech32)
-// - SegWit mainnet: starts with 'btq1q' (bech32)
-// - Legacy testnet: starts with 'm' or 'n' (but shorter than Dilithium)
-// - Legacy mainnet: starts with 'B'
-function isValidBTQAddress(address) {
-  if (!address || typeof address !== 'string') return false;
-
-  // Dilithium addresses (base58, longer ~50 chars)
-  if (/^[nd][a-km-zA-HJ-NP-Z1-9]{40,60}$/.test(address)) {
-    return true;
+function prefillAddressFromLink() {
+  const link = BTQAddress.readAddressParam(window.location.search, { hrp: bech32Hrp });
+  if (link.status === 'valid') {
+    addressInput.value = link.address;
+  } else if (link.status === 'invalid') {
+    showError('The address in this link is not a valid BTQ testnet address.');
   }
-
-  // SegWit bech32 addresses
-  if (/^(tbtq1q|btq1q)[a-z0-9]{38,}$/.test(address)) {
-    return true;
-  }
-
-  // Legacy addresses (shorter base58)
-  if (/^[mMnNB][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(address)) {
-    return true;
-  }
-
-  return false;
 }
 
 // State Management
@@ -337,14 +318,15 @@ function closeWebSocket() {
 
 // Mining Flow
 async function startMining() {
-  const address = addressInput.value.trim();
+  const input = addressInput.value.trim();
 
-  if (!address) {
+  if (!input) {
     showError('Please enter a BTQ address.');
     return;
   }
 
-  if (!isValidBTQAddress(address)) {
+  const address = BTQAddress.normalizeAddress(input, { hrp: bech32Hrp });
+  if (!address) {
     showError('Invalid BTQ address format.');
     return;
   }
@@ -652,6 +634,8 @@ async function initialize() {
     // Check for captcha configuration
     const configResponse = await fetch('/api/config');
     const config = await configResponse.json();
+    if (config.bech32Hrp) bech32Hrp = config.bech32Hrp;
+    prefillAddressFromLink();
 
     if (config.captchaSiteKey) {
       captchaEnabled = true;
