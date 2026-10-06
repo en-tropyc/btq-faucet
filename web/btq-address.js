@@ -122,5 +122,12 @@
     return type === 'segwit' || type === 'p2mr' ? trimmed.toLowerCase() : trimmed;
   }
 
-  return { DEFAULT_HRP, decodeSegwit, getAddressType, normalizeAddress };
+  function readAddressParam(search, options) {
+    const raw = new URLSearchParams(search).get('address');
+    if (raw === null || raw.trim() === '') return { status: 'none' };
+    const address = normalizeAddress(raw, options);
+    return address ? { status: 'valid', address } : { status: 'invalid' };
+  }
+
+  return { DEFAULT_HRP, decodeSegwit, getAddressType, normalizeAddress, readAddressParam };
 });

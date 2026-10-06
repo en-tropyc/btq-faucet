@@ -104,3 +104,20 @@ test('round-trips random P2MR programs', () => {
     assert.equal(BTQAddress.getAddressType(encodeSegwit('tbtq', 2, program, 'bech32')), null);
   }
 });
+
+test('readAddressParam ignores links without an address', () => {
+  assert.deepEqual(BTQAddress.readAddressParam(''), { status: 'none' });
+  assert.deepEqual(BTQAddress.readAddressParam('?ref=wallet'), { status: 'none' });
+  assert.deepEqual(BTQAddress.readAddressParam('?address='), { status: 'none' });
+});
+
+test('readAddressParam returns the normalized address from a valid link', () => {
+  assert.deepEqual(BTQAddress.readAddressParam(`?address=${P2MR}`), { status: 'valid', address: P2MR });
+  assert.deepEqual(BTQAddress.readAddressParam(`?address=%20${P2MR.toUpperCase()}`), { status: 'valid', address: P2MR });
+  assert.deepEqual(BTQAddress.readAddressParam(`?address=${REGTEST_P2MR}`, { hrp: 'qcrt' }), { status: 'valid', address: REGTEST_P2MR });
+});
+
+test('readAddressParam flags invalid addresses without echoing them', () => {
+  assert.deepEqual(BTQAddress.readAddressParam('?address=%3Cscript%3Ealert(1)%3C%2Fscript%3E'), { status: 'invalid' });
+  assert.deepEqual(BTQAddress.readAddressParam(`?address=${MAINNET_LOOKING}`), { status: 'invalid' });
+});
